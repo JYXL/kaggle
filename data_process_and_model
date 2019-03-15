@@ -1,0 +1,135 @@
+import numpy as np
+import pandas as pd
+import lightgbm as lgb
+from sklearn import preprocessing
+from sklearn.metrics import mean_squared_error
+from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.model_selection import StratifiedKFold
+from imblearn.over_sampling import RandomOverSampler
+from imblearn.over_sampling import SMOTE
+from imblearn.under_sampling import RandomUnderSampler
+from collections import Counter
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import OneHotEncoder
+
+
+
+
+def data_normal(arg, *args, method=preprocessing.StandardScaler()):
+    features = [c for c in args[0].columns if c not in ['ID_code', 'target']]
+    if arg != 1:
+        args_0 = pd.concat([args[0]['ID_code'], args[0]['target']], axis=1)
+    data = pd.DataFrame()
+    for i in args:
+        data = pd.concat([data, i[features]], axis=0)
+    data = pd.DataFrame(method.fit_transform(data), columns=features)
+    if arg == 2:
+        length = args[0].shape[0]
+        return pd.concat([args_0, data.iloc[:length,:]], axis=1), \
+               pd.concat([args[1]['ID_code'], data.iloc[length:, :].reset_index(drop=True)], axis=1)
+    elif arg == 1:
+        return pd.concat([args[0]['ID_code'], data], axis=1)
+    else:
+        return pd.concat([args_0, data], axis=1)
+
+def feature_add(arg, *args):
+    features = [c for c in args[0].columns if c not in ['ID_code', 'target']]
+    if arg != 1:
+        args_0 = pd.concat([args[0]['ID_code'], args[0]['target']], axis=1)
+    data = pd.DataFrame()
+    for i in args:
+        data = pd.concat([data, i[features]], axis=0)
+    for feature in features:
+        data['r1_'+feature] = np.round(data[feature], 1)
+        data['r2_'+feature] = np.round(data[feature], 2)
+        data['sq_'+feature] = data[feature]**2
+        data['sqrt_'+feature] = np.abs(data[feature])**(1/2)
+        data['c_'+feature] = data[feature]**3
+        data['p4_'+feature] = data[feature]**4
+    if arg == 2:
+        length = args[0].shape[0]
+        return pd.concat([args_0, data.iloc[:length,:]], axis=1), \
+               pd.concat([args[1]['ID_code'], data.iloc[length:,:]], axis=1)
+    elif arg == 1:
+        return pd.concat([args[0]['ID_code'], data], axis=1)
+    else:
+        return pd.concat([args_0, data], axis=1)
+
+def feature_round(data):
+    features = [c for c in data.columns if c not in ['ID_code', 'target']]
+    new_data = pd.DataFrame()
+    for feature in features:
+        new_data[feature] = np.around(data[feature])
+    return new_data
+
+def data_onehot(data):
+    enc = OneHotEncoder(categories='auto')
+    x = enc.fit_transform(data).toarray()
+    print(x.shape)
+    return x
+
+def sample_take(data, method=RandomOverSampler()):
+    features = [c for c in data.columns if c not in ['ID_code', 'target']]
+    target = data['target']
+    features_resampled, target_resampled = method.fit_sample(data[features], target)
+    x = pd.DataFrame(features_resampled, columns=features)
+    y = pd.DataFrame(target_resampled, columns=['target'])
+    return pd.concat([x, y], axis=1)
+
+def train_model(data_train, data_test):
+    folds = StratifiedKFold(n_splits=9, shuffle=True, random_state=31415)
+
+    # data_train = data_train.infer_objects()
+    # data_test = data_test.infer_objects()
+    target_resampled = data_train['target']
+    oof = np.zeros(len(data_train))
+    predictions = np.zeros(len(data_test))
+    feature_importance_df = pd.DataFrame()
+    features = [c for c in data_train.columns if c not in ['ID_code', 'target']]
+
+    param = {
+        'num_leaves': 6,
+        'max_bin': 63,
+        'min_data_in_leaf': 45,
+        'learning_rate': 0.01,
+        'min_sum_hessian_in_leaf': 0.000446,
+        'bagging_fraction': 0.55,
+        'bagging_freq': 5,
+        'max_depth': 14,
+        'save_binary': True,
+        'seed': 31452,
+        'feature_fraction_seed': 31415,
+        'feature_fraction': 0.51,
+        'bagging_seed': 31415,
+        'drop_seed': 31415,
+        'data_random_seed': 31415,
+        'objective': 'binary',
+        'boosting_type': 'gbdt',
+        'verbose': 1,
+        'metric': 'auc',
+        'is_unbalance': True,
+        'boost_from_average': False,
+    }
+    for fold_, (trn_idx, val_idx) in enumerate(folds.split(data_train.values, target_resampled)):
+        print("Fold {}".format(fold_))
+        trn_data = lgb.Dataset(data_train.iloc[trn_idx][features], label=target_resampled[trn_idx])
+        val_data = lgb.Dataset(data_train.iloc[val_idx][features], label=target_resampled[val_idx])
+
+        num_round = 15000
+        clf = lgb.train(param, trn_data, num_round, valid_sets=[trn_data, val_data], verbose_eval=1000,
+                        early_stopping_rounds=250)
+        oof[val_idx] = clf.predict(data_train.iloc[val_idx][features], num_iteration=clf.best_iteration)
+
+        fold_importance_df = pd.DataFrame()
+        fold_importance_df["Feature"] = features
+        fold_importance_df["importance"] = clf.feature_importance()
+        fold_importance_df["fold"] = fold_ + 1
+        feature_importance_df = pd.concat([feature_importance_df, fold_importance_df], axis=0)
+
+        predictions += clf.predict(data_test[features], num_iteration=clf.best_iteration) / folds.n_splits
+
+    print("CV score: {:<8.5f}".format(roc_auc_score(target_resampled, oof)))
+
+    sub_df = pd.DataFrame({"ID_code": data_test["ID_code"].values})
+    sub_df["target"] = predictions
+    return sub_df
